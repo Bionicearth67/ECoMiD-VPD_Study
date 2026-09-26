@@ -1,0 +1,163 @@
+---
+title: "Supplemental — Source of Vaccination Information by Dose"
+author: "Stuart Torres, Ben Arnold"
+date: "Updated `r Sys.Date()`"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: true
+    link-external-newwindow: true
+---
+
+# Preamble
+
+```{r preamble, message=FALSE}
+library(here)
+source(here("R", "0-config.R"))
+```
+
+# Load and prepare data
+
+```{r load-data}
+#-------------------------------
+# read processed dataset
+#-------------------------------
+d0 <- read_rds(here("data", "ecomid_sero_vpd_2026-09-21.rds"))
+length(unique(d0$sampleid))
+#-------------------------------
+# the source-of-information variables are child-level (constant within child).
+# collapse to one row per child; denominator = children with serology (n = 370).
+#-------------------------------
+src_vars <- c("penta1_source", "penta2_source", "penta3_source",
+              "mmr1_source", "mmr2_source")
+
+dose_map <- c(
+  penta1_source = "Penta 1", penta2_source = "Penta 2", penta3_source = "Penta 3",
+  mmr1_source   = "MMR 1",   mmr2_source   = "MMR 2"
+)
+dose_levels <- c("Penta 1", "Penta 2", "Penta 3", "MMR 1", "MMR 2")
+
+child <- d0 %>%
+  group_by(childid) %>%
+  summarise(across(all_of(src_vars), ~ first(.x)), .groups = "drop")
+
+n_children <- nrow(child)
+cat("Children with serology (denominator):", n_children, "\n")
+
+#-------------------------------
+# long form: one row per child x dose; recode missing source to "No record"
+#-------------------------------
+src_long <- child %>%
+  pivot_longer(all_of(src_vars), names_to = "dose_var", values_to = "source") %>%
+  mutate(
+    dose   = factor(dose_map[dose_var], levels = dose_levels),
+    source = factor(replace_na(source, "No record"),
+                    levels = c("Vaccine card", "Maternal rep", "No record"))
+  )
+
+#-------------------------------
+# counts and percentages by dose x source (denominator = all children per dose)
+#-------------------------------
+src_summary <- src_long %>%
+  count(dose, source, .drop = FALSE) %>%
+  group_by(dose) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup()
+
+# card % with exact binomial 95% CI (denominator = n_children)
+card_ci <- src_summary %>%
+  filter(source == "Vaccine card") %>%
+  rowwise() %>%
+  mutate(
+    ci_lo = binom.test(n, n_children)$conf.int[1] * 100,
+    ci_hi = binom.test(n, n_children)$conf.int[2] * 100
+  ) %>%
+  ungroup()
+```
+
+---
+
+# Table S2: Source of vaccination information by dose
+
+```{r tableS2}
+#-------------------------------
+# wide table: rows = dose; columns = source category counts (%),
+# plus vaccine-card % with exact binomial 95% CI
+#-------------------------------
+t10 <- src_summary %>%
+  mutate(cell = sprintf("%d (%.1f%%)", n, pct)) %>%
+  select(dose, source, cell) %>%
+  pivot_wider(names_from = source, values_from = cell) %>%
+  left_join(
+    card_ci %>%
+      transmute(dose,
+                `Vaccine card % (95% CI)` =
+                  sprintf("%.1f%% (%.1f%% to %.1f%%)", pct, ci_lo, ci_hi)),
+    by = "dose"
+  ) %>%
+  arrange(dose) %>%
+  rename(Dose = dose, `Maternal report` = `Maternal rep`)
+
+write_csv(t10, here("output", "tables", "tableS2_vaccine_info_source.csv"))
+cat("Table S2 saved.\n")
+
+t10 %>%
+  gt() %>%
+  tab_header(
+    title = "Table S2. Source of vaccination information by dose",
+    subtitle = sprintf("Children with serology (n = %d)", n_children)
+  ) %>%
+  tab_spanner(label = "n (%) by information source",
+              columns = c(`Vaccine card`, `Maternal report`, `No record`)) %>%
+  tab_footnote("Denominator is all children with serology (n = 370) for every dose. 'No record' = neither a vaccine card nor maternal report available for that dose. The final column repeats the vaccine-card percentage with a 95% exact binomial CI.")
+```
+
+---
+
+# Figure S2: Percentage with a vaccine card record, by dose
+
+Following the aesthetic of Figure 1B (point-and-line, dose color palette,
+0–100% axis), with the pentavalent and MMR dose series connected separately.
+
+```{r fig6, fig.width=7, fig.height=5}
+#-------------------------------
+# shared dose palette (from 0-config.R), matching Figure 1B
+#-------------------------------
+dose_colors <- c(
+  "Penta 1" = penta_pal[["1"]], "Penta 2" = penta_pal[["2"]], "Penta 3" = penta_pal[["3"]],
+  "MMR 1"   = mmr_pal[["1"]],   "MMR 2"   = mmr_pal[["2"]]
+)
+
+fig_dat <- card_ci %>%
+  mutate(vaccine = if_else(str_starts(as.character(dose), "Penta"),
+                           "Pentavalent", "MMR"))
+
+fig6 <- fig_dat %>%
+  ggplot(aes(x = dose, y = pct, color = dose, group = vaccine)) +
+  geom_line(color = "gray70") +
+  geom_linerange(aes(ymin = ci_lo, ymax = ci_hi)) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = dose_colors, guide = "none") +  # doses labeled on x-axis
+  scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
+  labs(x = "Vaccine dose", y = "Children with a vaccine card record (%)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+fig6
+
+ggsave(
+  filename = here("output", "figures", "figS3_vaccine_info_source.tiff"),
+  plot = fig6,
+  width = 150, height = 105, units = "mm", dpi = 300
+)
+cat("Figure S2 saved.\n")
+```
+
+---
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```
